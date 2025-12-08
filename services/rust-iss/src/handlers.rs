@@ -10,19 +10,21 @@ use sqlx::PgPool;
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
+    pub cache: crate::cache::CacheClient,
     pub iss_service: IssService,
     pub osdr_service: OsdrService,
     pub space_service: SpaceService,
 }
 
 impl AppState {
-    pub async fn new(pool: PgPool, client: crate::clients::ApiClient) -> Self {
+    pub async fn new(pool: PgPool, client: crate::clients::ApiClient, cache: crate::cache::CacheClient) -> Self {
         let iss = IssService::new(pool.clone(), client.clone());
         let osdr = OsdrService::new(pool.clone(), client.clone());
         let space = SpaceService::new(pool.clone(), client);
 
         Self {
             pool,
+            cache,
             iss_service: iss,
             osdr_service: osdr,
             space_service: space,

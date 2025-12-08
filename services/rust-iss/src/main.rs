@@ -1,3 +1,4 @@
+mod cache;
 mod clients;
 mod config;
 mod domain;
@@ -40,8 +41,13 @@ async fn main() -> anyhow::Result<()> {
     // Создать HTTP клиент
     let api_client = clients::ApiClient::new(config.clone())?;
     info!("HTTP client created");
+
+    // Создать Redis кэш клиент
+    let cache_client = cache::CacheClient::new(&config.redis_url, 3600).await?;
+    info!("Redis cache client created");
+
     // Создать App State (DI контейнер)
-    let state = AppState::new(pool.clone(), api_client).await;
+    let state = AppState::new(pool.clone(), api_client, cache_client).await;
 
     // ============ Фоновые задачи ============
 
@@ -155,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Инициализация БД: создание таблиц если их нет
+/// Инициализация БД
 async fn init_db(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     // ISS Fetch Log
     sqlx::query(
