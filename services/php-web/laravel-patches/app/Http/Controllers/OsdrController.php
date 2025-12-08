@@ -3,68 +3,68 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
+use App\Services\OsdrService;
 
+/**
+ * OsdrController - рефакторен для использования OsdrService
+ * Вся бизнес-логика переведена в сервис
+ */
 class OsdrController extends Controller
 {
+    public function __construct(
+        private OsdrService $osdrService
+    ) {}
+
     public function index(Request $request)
     {
-        $limit = $request->query('limit', '20'); // учебная нестрогая валидация
-        $base  = getenv('RUST_BASE') ?: 'http://rust_iss:3000';
-
-        $json  = @file_get_contents($base.'/osdr/list?limit='.$limit);
-        $data  = $json ? json_decode($json, true) : ['items' => []];
-        $items = $data['items'] ?? [];
-
-        $items = $this->flattenOsdr($items); // ключевая строка
+        $limit = min((int)$request->query('limit', 20), 100);
+        
+        // Получаем OsdrItemDTO через сервис с кэшированием и фильтрацией
+        $items = $this->osdrService->getList($limit);
+        
+        // Преобразуем DTO в массив для обратной совместимости с Blade шаблонами
+        $flatItems = $items->map(fn($item) => [
+            'id'          => $item->id,
+            'dataset_id'  => $item->dataset_id,
+            'title'       => $item->dataset_title,
+            'status'      => 'active',
+            'updated_at'  => null,
+            'inserted_at' => null,
+            'rest_url'    => $item->getRawRestUrl(),
+            'raw'         => $item->variables ?? [],
+        ])->toArray();
 
         return view('osdr', [
-            'items' => $items,
-            'src'   => $base.'/osdr/list?limit='.$limit,
+            'items' => $flatItems,
+            'src'   => 'Service: OsdrService::getList(' . $limit . ')',
         ]);
     }
 
-    /** Преобразует данные вида {"OSD-1": {...}, "OSD-2": {...}} в плоский список */
-    private function flattenOsdr(array $items): array
+    /**
+     * API: поиск по названию датасета
+     */
+    public function search(Request $request)
     {
-        $out = [];
-        foreach ($items as $row) {
-            $raw = $row['raw'] ?? [];
-            if (is_array($raw) && $this->looksOsdrDict($raw)) {
-                foreach ($raw as $k => $v) {
-                    if (!is_array($v)) continue;
-                    $rest = $v['REST_URL'] ?? $v['rest_url'] ?? $v['rest'] ?? null;
-                    $title = $v['title'] ?? $v['name'] ?? null;
-                    if (!$title && is_string($rest)) {
-                        // запасной вариант: последний сегмент URL как подпись
-                        $title = basename(rtrim($rest, '/'));
-                    }
-                    $out[] = [
-                        'id'          => $row['id'],
-                        'dataset_id'  => $k,
-                        'title'       => $title,
-                        'status'      => $row['status'] ?? null,
-                        'updated_at'  => $row['updated_at'] ?? null,
-                        'inserted_at' => $row['inserted_at'] ?? null,
-                        'rest_url'    => $rest,
-                        'raw'         => $v,
-                    ];
-                }
-            } else {
-                // обычная строка — просто прокинем REST_URL если найдётся
-                $row['rest_url'] = is_array($raw) ? ($raw['REST_URL'] ?? $raw['rest_url'] ?? null) : null;
-                $out[] = $row;
-            }
-        }
-        return $out;
-    }
+        $query = $request->query('q', '');
 
-    private function looksOsdrDict(array $raw): bool
-    {
-        // словарь ключей "OSD-xxx" ИЛИ значения содержат REST_URL
-        foreach ($raw as $k => $v) {
-            if (is_string($k) && str_starts_with($k, 'OSD-')) return true;
-            if (is_array($v) && (isset($v['REST_URL']) || isset($v['rest_url']))) return true;
+        if (strlen($query) < 2) {
+            return view('osdr', ['items' => [], 'search_query' => $query]);
         }
-        return false;
+
+        $results = $this->osdrService->search($query);
+        
+        $flatItems = $results->map(fn($item) => [
+            'id'          => $item->id,
+            'dataset_id'  => $item->dataset_id,
+            'title'       => $item->dataset_title,
+            'rest_url'    => $item->getRawRestUrl(),
+            'raw'         => $item->variables ?? [],
+        ])->toArray();
+
+        return view('osdr', [
+            'items' => $flatItems,
+            'search_query' => $query,
+            'src' => 'Service: OsdrService::search("' . $query . '")',
+        ]);
     }
 }
