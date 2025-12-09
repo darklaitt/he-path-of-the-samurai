@@ -128,3 +128,9 @@ services:
       - csvdata:/data/csv
     networks:
       - backend
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /data/csv/telemetry_*.csv && echo 'ok' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
