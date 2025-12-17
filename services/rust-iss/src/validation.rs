@@ -16,6 +16,15 @@ pub struct OsdrQueryParams {
     
     #[validate(length(min = 1, max = 100))]
     pub status: Option<String>,
+    
+    #[validate(length(min = 1, max = 200))]
+    pub search: Option<String>,
+    
+    #[validate(length(min = 1, max = 50))]
+    pub sort_by: Option<String>,
+    
+    #[validate(length(min = 1, max = 10))]
+    pub sort_order: Option<String>,
 }
 
 /// Валидация параметров Space Cache

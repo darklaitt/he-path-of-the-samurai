@@ -3,7 +3,7 @@ program LegacyCSV;
 {$mode objfpc}{$H+}
 
 uses
-  SysUtils, DateUtils, Process, Classes;
+  SysUtils, DateUtils, Classes;
 
 { Global logger }
 procedure LogInfo(const msg: string);
@@ -32,10 +32,11 @@ end;
 
 procedure GenerateAndCopy();
 var
-  outDir, fn, fullpath, pghost, pgport, pguser, pgpass, pgdb, copyCmd: string;
+  outDir, fn, fullpath, pghost, pgport, pguser, pgpass, pgdb, copyCmd, boolText: string;
   f: TextFile;
   ts: string;
   voltage, temp: Double;
+  isOk: Boolean;
   exitCode: Integer;
 begin
   try
@@ -48,14 +49,23 @@ begin
     // Generate telemetry values
     voltage := RandFloat(3.2, 12.6);
     temp := RandFloat(-50.0, 80.0);
+    isOk := (Random(2) = 1);
+    if isOk then
+      boolText := 'ИСТИНА'
+    else
+      boolText := 'ЛОЖЬ';
 
-    // Write CSV file
+    // Write CSV file (строгие типы: timestamp, logical, numeric, text)
     LogInfo('generating CSV: ' + fullpath);
     AssignFile(f, fullpath);
     Rewrite(f);
     try
-      Writeln(f, 'recorded_at,voltage,temp,source_file');
+      // Header:
+      // recorded_at (TIMESTAMP), is_ok (LOGICAL TEXT: ИСТИНА/ЛОЖЬ), voltage (NUMERIC), temp (NUMERIC), source_file (TEXT)
+      Writeln(f, 'recorded_at,is_ok,voltage,temp,source_file');
+      // Timestamp в формате, который корректно парсит PostgreSQL
       Writeln(f, FormatDateTime('yyyy-mm-dd hh:nn:ss', Now) + ',' +
+                 boolText + ',' +
                  FormatFloat('0.00', voltage) + ',' +
                  FormatFloat('0.00', temp) + ',' +
                  fn);
@@ -73,16 +83,13 @@ begin
 
     // COPY into PostgreSQL
     LogInfo('inserting into telemetry_legacy via COPY');
-    copyCmd := 'psql -h ' + pghost + ' -p ' + pgport + ' -U ' + pguser + 
-               ' -d ' + pgdb +
-               ' -c "\copy telemetry_legacy(recorded_at, voltage, temp, source_file) ' +
+    copyCmd := 'PGPASSWORD=' + pgpass + ' psql -h ' + pghost + ' -p ' + pgport + 
+               ' -U ' + pguser + ' -d ' + pgdb +
+               ' -c "\copy telemetry_legacy(recorded_at, is_ok, voltage, temp, source_file) ' +
                'FROM ''' + fullpath + ''' WITH (FORMAT csv, HEADER true)"';
     
-    // Set password in environment for psql
-    SetEnvironmentVariable('PGPASSWORD', pgpass);
-    
-    // Execute COPY command
-    exitCode := fpSystem(copyCmd);
+    // Execute COPY command via system shell
+    exitCode := ExecuteProcess('/bin/sh', '-c ' + copyCmd);
     
     if exitCode <> 0 then
       LogError('COPY command failed with exit code: ' + IntToStr(exitCode))

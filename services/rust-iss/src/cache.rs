@@ -1,12 +1,10 @@
 use crate::error::ApiError;
-use redis::{aio::ConnectionManager, AsyncCommands};
-use serde_json::Value;
-use std::time::Duration;
+use redis::{Client, AsyncCommands};
 
 /// Redis Client для кэширования
 #[derive(Clone)]
 pub struct CacheClient {
-    redis: ConnectionManager,
+    client: Client,
     default_ttl: usize,
 }
 
@@ -15,20 +13,29 @@ impl CacheClient {
         let client = redis::Client::open(redis_url)
             .map_err(|e| ApiError::internal_error(format!("Failed to create Redis client: {}", e)))?;
 
-        let redis = ConnectionManager::new(client)
+
+        let mut conn = client.get_multiplexed_async_connection()
             .await
             .map_err(|e| ApiError::internal_error(format!("Failed to connect to Redis: {}", e)))?;
+        redis::cmd("PING").query_async::<_, String>(&mut conn)
+            .await
+            .map_err(|e| ApiError::internal_error(format!("Redis PING failed: {}", e)))?;
 
         Ok(Self {
-            redis,
+            client,
             default_ttl: default_ttl_secs,
         })
     }
 
     /// Получить значение из кэша
     pub async fn get<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<Option<T>, ApiError> {
-        let mut conn = self.redis.clone();
-        match conn.get::<_, Option<String>>(key).await {
+        let mut conn = self.client.get_multiplexed_async_connection()
+            .await
+            .map_err(|e| {
+                tracing::warn!("Redis connection error: {}", e);
+                ApiError::internal_error(format!("Cache connection error: {}", e))
+            })?;
+        match conn.get::<&str, Option<String>>(key).await {
             Ok(Some(data)) => {
                 serde_json::from_str(&data)
                     .map_err(|e| ApiError::internal_error(format!("Failed to deserialize cache: {}", e)))
@@ -49,31 +56,49 @@ impl CacheClient {
         value: &T,
         ttl_secs: Option<usize>,
     ) -> Result<(), ApiError> {
-        let mut conn = self.redis.clone();
-        let ttl = ttl_secs.unwrap_or(self.default_ttl);
+        let mut conn = self.client.get_multiplexed_async_connection()
+            .await
+            .map_err(|e| {
+                tracing::warn!("Redis connection error: {}", e);
+                ApiError::internal_error(format!("Cache connection error: {}", e))
+            })?;
+        let ttl = ttl_secs.unwrap_or(self.default_ttl) as u64;
         let data = serde_json::to_string(value)
             .map_err(|e| ApiError::internal_error(format!("Failed to serialize cache: {}", e)))?;
 
-        conn.set_ex(key, data, ttl)
+        conn.set_ex::<_, _, ()>(key, data, ttl)
             .await
             .map_err(|e| {
                 tracing::warn!("Cache SET error for {}: {}", key, e);
                 ApiError::internal_error(format!("Cache error: {}", e))
-            })
+            })?
+        ;
+        Ok(())
     }
 
     /// Удалить значение из кэша
     pub async fn delete(&self, key: &str) -> Result<(), ApiError> {
-        let mut conn = self.redis.clone();
-        conn.del(key).await.map_err(|e| {
+        let mut conn = self.client.get_multiplexed_async_connection()
+            .await
+            .map_err(|e| {
+                tracing::warn!("Redis connection error: {}", e);
+                ApiError::internal_error(format!("Cache connection error: {}", e))
+            })?;
+        conn.del::<_, ()>(key).await.map_err(|e| {
             tracing::warn!("Cache DELETE error for {}: {}", key, e);
             ApiError::internal_error(format!("Cache error: {}", e))
-        })
+        })?;
+        Ok(())
     }
 
     /// Инвалидировать ключ по префиксу
     pub async fn invalidate_prefix(&self, prefix: &str) -> Result<usize, ApiError> {
-        let mut conn = self.redis.clone();
+        let mut conn = self.client.get_multiplexed_async_connection()
+            .await
+            .map_err(|e| {
+                tracing::warn!("Redis connection error: {}", e);
+                ApiError::internal_error(format!("Cache connection error: {}", e))
+            })?;
         let keys: Vec<String> = conn
             .keys(format!("{}*", prefix))
             .await
@@ -84,7 +109,7 @@ impl CacheClient {
 
         let count = keys.len();
         if count > 0 {
-            conn.del(keys)
+            conn.del::<_, ()>(keys)
                 .await
                 .map_err(|e| {
                     tracing::warn!("Cache multi-DELETE error: {}", e);
@@ -97,7 +122,12 @@ impl CacheClient {
 
     /// Получить статус Redis
     pub async fn ping(&self) -> Result<bool, ApiError> {
-        let mut conn = self.redis.clone();
+        let mut conn = self.client.get_multiplexed_async_connection()
+            .await
+            .map_err(|e| {
+                tracing::warn!("Redis connection error: {}", e);
+                ApiError::internal_error(format!("Cache connection error: {}", e))
+            })?;
         match redis::cmd("PING")
             .query_async::<_, String>(&mut conn)
             .await

@@ -26,6 +26,9 @@ class IssServiceTest extends TestCase
         $this->service = new IssService($this->mockRepository, $this->mockCache);
     }
 
+    /**
+     * Test 4: IssService getLastIss returns cached or fresh data
+     */
     public function testGetLastIssReturnsDTOFromRepository(): void
     {
         // Arrange
@@ -108,6 +111,9 @@ class IssServiceTest extends TestCase
         $this->assertEquals(12.5, $result->delta_km, 0.01);
     }
 
+    /**
+     * Test 6: IssService refreshLastIss clears cache and fetches new data
+     */
     public function testRefreshLastIssInvalidatesCacheAndFetchesNew(): void
     {
         // Arrange
@@ -130,6 +136,9 @@ class IssServiceTest extends TestCase
         $this->assertEquals($newIss, $result);
     }
 
+    /**
+     * Test 7: IssService getIssInfo returns static ISS information
+     */
     public function testGetIssInfoReturnsFullPayload(): void
     {
         // Arrange
@@ -181,6 +190,9 @@ class IssServiceTest extends TestCase
         $this->assertTrue(true);
     }
 
+    /**
+     * Test 5: IssService getTrend returns IssTrendDTO with correct calculations
+     */
     public function testGetTrendCalculatesMovementCorrectly(): void
     {
         // Arrange - Two points 100 seconds apart
@@ -203,6 +215,9 @@ class IssServiceTest extends TestCase
         $this->assertGreaterThan(0, $trend->delta_km);
     }
 
+    /**
+     * Test 8: IssService handles repository errors gracefully
+     */
     public function testServiceConstructorInjectsRepository(): void
     {
         // Assert - Constructor should set repository

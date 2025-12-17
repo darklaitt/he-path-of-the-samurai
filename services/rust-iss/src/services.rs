@@ -2,6 +2,7 @@ use crate::clients::ApiClient;
 use crate::domain::*;
 use crate::error::ApiError;
 use crate::repo::*;
+use crate::cache::{CacheClient, cache_keys};
 use chrono::Utc;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -12,20 +13,39 @@ use tracing::{error, info};
 pub struct IssService {
     pool: PgPool,
     client: ApiClient,
+    cache: CacheClient,
 }
 
 impl IssService {
-    pub fn new(pool: PgPool, client: ApiClient) -> Self {
-        Self { pool, client }
+    pub fn new(pool: PgPool, client: ApiClient, cache: CacheClient) -> Self {
+        Self { pool, client, cache }
     }
 
     /// Получить последние данные МКС
     pub async fn get_last(&self) -> Result<Option<IssFetchLog>, ApiError> {
-        IssRepository::get_last(&self.pool).await
+        // Проверяем кэш
+        if let Ok(Some(cached)) = self.cache.get::<IssFetchLog>(cache_keys::iss_latest()).await {
+            return Ok(Some(cached));
+        }
+        
+        // Если нет в кэше, получаем из БД
+        let result = IssRepository::get_last(&self.pool).await?;
+        
+        // Сохраняем в кэш
+        if let Some(ref log) = result {
+            let _ = self.cache.set(cache_keys::iss_latest(), log, Some(300)).await;
+        }
+        
+        Ok(result)
     }
 
     /// Получить тренд движения МКС
     pub async fn get_trend(&self) -> Result<IssTrend, ApiError> {
+        // Проверяем кэш
+        if let Ok(Some(cached)) = self.cache.get::<IssTrend>(cache_keys::iss_trend()).await {
+            return Ok(cached);
+        }
+        
         let rows = IssRepository::get_trend(&self.pool).await?;
 
         if rows.len() < 2 {
@@ -51,7 +71,7 @@ impl IssService {
 
         let dt_sec = (to.fetched_at - from.fetched_at).num_milliseconds() as f64 / 1000.0;
 
-        Ok(IssTrend {
+        let trend = IssTrend {
             movement,
             delta_km,
             dt_sec,
@@ -62,7 +82,12 @@ impl IssService {
             from_lon,
             to_lat,
             to_lon,
-        })
+        };
+        
+        // Сохраняем в кэш
+        let _ = self.cache.set(cache_keys::iss_trend(), &trend, Some(60)).await;
+        
+        Ok(trend)
     }
 
     /// Fetch ISS данные и сохранить
@@ -70,7 +95,13 @@ impl IssService {
         let payload = self.client.fetch_iss().await?;
         let source_url = self.client.config().where_iss_url.clone();
 
-        IssRepository::save(&self.pool, &source_url, payload).await
+        let log = IssRepository::save(&self.pool, &source_url, payload).await?;
+        
+        // Инвалидируем кэш
+        let _ = self.cache.delete(cache_keys::iss_latest()).await;
+        let _ = self.cache.delete(cache_keys::iss_trend()).await;
+        
+        Ok(log)
     }
 
     fn extract_f64(value: &Value, key: &str) -> Option<f64> {
@@ -101,17 +132,31 @@ impl IssService {
 pub struct OsdrService {
     pool: PgPool,
     client: ApiClient,
+    cache: CacheClient,
 }
 
 impl OsdrService {
-    pub fn new(pool: PgPool, client: ApiClient) -> Self {
-        Self { pool, client }
+    pub fn new(pool: PgPool, client: ApiClient, cache: CacheClient) -> Self {
+        Self { pool, client, cache }
     }
 
     /// Получить список items
     pub async fn list(&self, limit: Option<i64>) -> Result<Vec<OsdrItem>, ApiError> {
         let limit = limit.unwrap_or(20).min(100).max(1);
-        OsdrRepository::list(&self.pool, limit).await
+        
+        // Проверяем кэш
+        let cache_key = cache_keys::osdr_list(limit);
+        if let Ok(Some(cached)) = self.cache.get::<Vec<OsdrItem>>(&cache_key).await {
+            return Ok(cached);
+        }
+        
+        // Если нет в кэше, получаем из БД
+        let result = OsdrRepository::list(&self.pool, limit).await?;
+        
+        // Сохраняем в кэш
+        let _ = self.cache.set(&cache_key, &result, Some(600)).await;
+        
+        Ok(result)
     }
 
     /// Синхронизировать с внешним API
@@ -129,20 +174,69 @@ impl OsdrService {
         }
 
         info!("OSDR sync completed: {} items written", written);
+        
+        // Инвалидируем кэш OSDR
+        let _ = self.cache.invalidate_prefix(cache_keys::osdr_prefix()).await;
+        let _ = self.cache.delete(cache_keys::osdr_count()).await;
+        
         Ok(written)
     }
 
     async fn save_item(&self, item: Value) -> Result<(), ApiError> {
-        let id = Self::pick_string(&item, &["dataset_id", "id", "uuid", "studyId"]);
-        let title = Self::pick_string(&item, &["title", "name", "label"]);
-        let status = Self::pick_string(&item, &["status", "state", "lifecycle"]);
-        let updated = Self::pick_datetime(&item, &["updated", "updated_at", "modified"]);
+        // Extract fields from OSDR Search API _source
+        let id = Self::pick_string(&item, &[
+            "Accession",  // OSDR Search API field
+            "Study Identifier",
+            "dataset_id", 
+            "id", 
+            "uuid", 
+            "studyId"
+        ]);
+        
+        let title = Self::pick_string(&item, &[
+            "Study Title",  // OSDR Search API field
+            "title", 
+            "name", 
+            "label"
+        ]);
+        
+        let status = Self::pick_string(&item, &[
+            "Project Type",  // OSDR Search API field
+            "status", 
+            "state", 
+            "lifecycle"
+        ]);
+        
+        let updated = Self::pick_datetime(&item, &[
+            "Study Public Release Date",
+            "updated", 
+            "updated_at", 
+            "modified"
+        ]);
 
         OsdrRepository::upsert(&self.pool, id.as_deref(), title, status, updated, item).await?;
         Ok(())
     }
 
     fn parse_items_array(&self, json: Value) -> Vec<Value> {
+        // OSDR Search API returns hits.hits[].._source structure
+        // First try nested hits.hits path
+        if let Some(hits_obj) = json.get("hits") {
+            if let Some(hits_array) = hits_obj.get("hits").and_then(|x| x.as_array()) {
+                // Extract _source from each hit
+                return hits_array.iter()
+                    .filter_map(|hit| hit.get("_source").cloned())
+                    .collect();
+            }
+            // Also try direct hits array
+            if let Some(hits_array) = hits_obj.as_array() {
+                return hits_array.iter()
+                    .filter_map(|hit| hit.get("_source").cloned())
+                    .collect();
+            }
+        }
+        
+        // Fallback for other response formats
         if let Some(a) = json.as_array() {
             a.clone()
         } else if let Some(v) = json.get("items").and_then(|x| x.as_array()) {
@@ -188,16 +282,31 @@ impl OsdrService {
 pub struct SpaceService {
     pool: PgPool,
     client: ApiClient,
+    cache: CacheClient,
 }
 
 impl SpaceService {
-    pub fn new(pool: PgPool, client: ApiClient) -> Self {
-        Self { pool, client }
+    pub fn new(pool: PgPool, client: ApiClient, cache: CacheClient) -> Self {
+        Self { pool, client, cache }
     }
 
     /// Получить последний кэш по источнику
     pub async fn get_latest(&self, source: &str) -> Result<Option<SpaceCache>, ApiError> {
-        CacheRepository::get_latest(&self.pool, source).await
+        // Проверяем Redis кэш
+        let cache_key = cache_keys::space_latest(source);
+        if let Ok(Some(cached)) = self.cache.get::<SpaceCache>(&cache_key).await {
+            return Ok(Some(cached));
+        }
+        
+        // Если нет в Redis, получаем из БД
+        let result = CacheRepository::get_latest(&self.pool, source).await?;
+        
+        // Сохраняем в Redis кэш
+        if let Some(ref cache) = result {
+            let _ = self.cache.set(&cache_key, cache, Some(300)).await;
+        }
+        
+        Ok(result)
     }
 
     /// Обновить кэш для конкретного источника
@@ -217,16 +326,37 @@ impl SpaceService {
                 self.client.fetch_donki_cme(&start, &end).await?
             }
             "spacex" => self.client.fetch_spacex_next().await?,
+            "jwst" => self.client.fetch_jwst().await?,
             _ => return Err(ApiError::bad_request("INVALID_SOURCE", "Unknown source")),
         };
 
-        CacheRepository::save(&self.pool, source, payload).await
+        let cache = CacheRepository::save(&self.pool, source, payload).await?;
+        
+        // Инвалидируем Redis кэш для этого источника
+        let _ = self.cache.delete(&cache_keys::space_latest(source)).await;
+        let _ = self.cache.delete(cache_keys::space_summary()).await;
+        
+        Ok(cache)
     }
 
     /// Получить summary всех источников
     pub async fn summary(&self) -> Result<Value, ApiError> {
+        // Проверяем кэш
+        if let Ok(Some(cached)) = self.cache.get::<Value>(cache_keys::space_summary()).await {
+            return Ok(cached);
+        }
+        
         let caches = CacheRepository::get_all_sources(&self.pool).await?;
-        let osdr_count = OsdrRepository::count(&self.pool).await?;
+        
+        // Проверяем кэш для osdr_count
+        let osdr_count = if let Ok(Some(cached_count)) = self.cache.get::<i64>(cache_keys::osdr_count()).await {
+            cached_count
+        } else {
+            let count = OsdrRepository::count(&self.pool).await?;
+            let _ = self.cache.set(cache_keys::osdr_count(), &count, Some(600)).await;
+            count
+        };
+        
         let iss_last = IssRepository::get_last(&self.pool).await?;
 
         let mut data = serde_json::json!({
@@ -247,6 +377,9 @@ impl SpaceService {
                 "payload": iss.payload
             });
         }
+        
+        // Сохраняем в кэш
+        let _ = self.cache.set(cache_keys::space_summary(), &data, Some(300)).await;
 
         Ok(data)
     }

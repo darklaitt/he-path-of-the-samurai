@@ -2,7 +2,12 @@ use crate::domain::*;
 use crate::error::ApiError;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
+
+// Advisory lock IDs для разных таблиц
+const ISS_LOCK_ID: i64 = 1001;
+const OSDR_LOCK_ID: i64 = 1002;
+const SPACE_CACHE_LOCK_ID: i64 = 1003;
 
 /// ISS Repository - работа с данными МКС
 pub struct IssRepository;
@@ -24,7 +29,8 @@ impl IssRepository {
     /// Сохранить новый ISS fetch с защитой от наложения (advisory lock)
     pub async fn save(pool: &PgPool, source_url: &str, payload: Value) -> Result<IssFetchLog, ApiError> {
         // Advisory lock для защиты от одновременных записей
-        sqlx::query("SELECT pg_advisory_lock(1)")
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(ISS_LOCK_ID)
             .execute(pool)
             .await?;
 
@@ -40,13 +46,16 @@ impl IssRepository {
         .await;
 
         // Освободить lock
-        let _ = sqlx::query("SELECT pg_advisory_unlock(1)").execute(pool).await;
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(ISS_LOCK_ID)
+            .execute(pool)
+            .await;
 
         result.map_err(ApiError::from)
     }
 
     /// Получить тренд (последние 2 записи)
-    pub async fn get_trend(pool: &PgPool) -> Result<(Vec<IssFetchLog>), ApiError> {
+    pub async fn get_trend(pool: &PgPool) -> Result<Vec<IssFetchLog>, ApiError> {
         let rows = sqlx::query_as::<_, IssFetchLog>(
             "SELECT id, fetched_at, source_url, payload
              FROM iss_fetch_log
@@ -101,7 +110,13 @@ impl OsdrRepository {
         updated_at: Option<DateTime<Utc>>,
         raw: Value,
     ) -> Result<OsdrItem, ApiError> {
-        let row = if let Some(ds_id) = dataset_id {
+        // Advisory lock для защиты от одновременных записей
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(OSDR_LOCK_ID)
+            .execute(pool)
+            .await?;
+
+        let result = if let Some(ds_id) = dataset_id {
             sqlx::query_as::<_, OsdrItem>(
                 "INSERT INTO osdr_items (dataset_id, title, status, updated_at, raw)
                  VALUES ($1, $2, $3, $4, $5)
@@ -118,7 +133,7 @@ impl OsdrRepository {
             .bind(updated_at)
             .bind(&raw)
             .fetch_one(pool)
-            .await?
+            .await
         } else {
             sqlx::query_as::<_, OsdrItem>(
                 "INSERT INTO osdr_items (dataset_id, title, status, updated_at, raw)
@@ -131,10 +146,16 @@ impl OsdrRepository {
             .bind(updated_at)
             .bind(&raw)
             .fetch_one(pool)
-            .await?
+            .await
         };
 
-        Ok(row)
+        // Освободить lock
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(OSDR_LOCK_ID)
+            .execute(pool)
+            .await;
+
+        result.map_err(ApiError::from)
     }
 
     /// Получить количество items
@@ -169,7 +190,13 @@ impl CacheRepository {
 
     /// Сохранить в кэш
     pub async fn save(pool: &PgPool, source: &str, payload: Value) -> Result<SpaceCache, ApiError> {
-        let row = sqlx::query_as::<_, SpaceCache>(
+        // Advisory lock для защиты от одновременных записей
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(SPACE_CACHE_LOCK_ID)
+            .execute(pool)
+            .await?;
+
+        let result = sqlx::query_as::<_, SpaceCache>(
             "INSERT INTO space_cache (source, payload, fetched_at)
              VALUES ($1, $2, $3)
              RETURNING id, source, fetched_at, payload"
@@ -178,9 +205,15 @@ impl CacheRepository {
         .bind(&payload)
         .bind(Utc::now())
         .fetch_one(pool)
-        .await?;
+        .await;
 
-        Ok(row)
+        // Освободить lock
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(SPACE_CACHE_LOCK_ID)
+            .execute(pool)
+            .await;
+
+        result.map_err(ApiError::from)
     }
 
     /// Получить все источники (для summary)

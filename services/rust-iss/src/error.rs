@@ -5,6 +5,7 @@ use axum::{
 };
 use serde_json::json;
 use std::fmt;
+use std::error::Error;
 use uuid::Uuid;
 
 /// Единый формат ошибок API
@@ -61,6 +62,8 @@ impl fmt::Display for ApiError {
         write!(f, "{}: {}", self.code, self.message)
     }
 }
+
+impl Error for ApiError {}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {

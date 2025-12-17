@@ -1,26 +1,45 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -e
 
-APP_DIR="/var/www/html"
-PATCH_DIR="/opt/laravel-patches"
-
-echo "[php] init start"
-
-if [ ! -f "$APP_DIR/artisan" ]; then
-  echo "[php] creating laravel skeleton"
-  composer create-project --no-interaction --prefer-dist laravel/laravel:^11 "$APP_DIR"
-  cp "$APP_DIR/.env.example" "$APP_DIR/.env" || true
-  sed -i 's|APP_NAME=Laravel|APP_NAME=ISSOSDR|g' "$APP_DIR/.env" || true
-  php "$APP_DIR/artisan" key:generate || true
+# Копируем Laravel приложение в рабочую директорию (поверх тома appdata)
+if [ -d "/opt/laravel-patches" ] && [ "$(ls -A /opt/laravel-patches)" ]; then
+    cp -r /opt/laravel-patches/* /var/www/html/ 2>/dev/null || true
+    cp -r /opt/laravel-patches/.[!.]* /var/www/html/ 2>/dev/null || true
+    echo "[INFO] Laravel application copied"
 fi
 
-if [ -d "$PATCH_DIR" ]; then
-  echo "[php] applying patches"
-  rsync -a "$PATCH_DIR/" "$APP_DIR/"
+# Переходим в директорию приложения
+cd /var/www/html
+
+# Гарантируем наличие необходимых директорий Laravel
+mkdir -p bootstrap/cache storage/framework/{cache,sessions,views} storage/logs
+chown -R www-data:www-data bootstrap storage 2>/dev/null || true
+chmod -R 775 bootstrap storage || true
+
+# Если .env отсутствует, копируем из примера (как в стандартном шаблоне)
+if [ ! -f ".env" ] && [ -f ".env.example" ]; then
+    cp .env.example .env
+    echo "[INFO] .env created from .env.example"
 fi
 
-chown -R www-data:www-data "$APP_DIR"
-chmod -R 775 "$APP_DIR/storage" "$APP_DIR/bootstrap/cache" || true
+# Если composer.json существует, устанавливаем зависимости
+if [ -f "composer.json" ]; then
+    echo "[INFO] Installing composer dependencies..."
+    composer install --no-dev --optimize-autoloader 2>&1 | tail -20 || echo "[WARN] Composer install had issues"
+    echo "[INFO] Composer dependencies installed"
+fi
 
-echo "[php] starting php-fpm"
-php-fpm -F
+# Генерируем ключ приложения если нужно
+if [ -f ".env" ]; then
+    if grep -q "APP_KEY=base64:" .env; then
+        echo "[INFO] APP_KEY already set"
+    else
+        php artisan key:generate 2>/dev/null || echo "[WARN] Could not generate key"
+    fi
+fi
+
+echo "[INFO] Starting PHP-FPM..."
+
+# Запускаем PHP-FPM
+exec php-fpm
+

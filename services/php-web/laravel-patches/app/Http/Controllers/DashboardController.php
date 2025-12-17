@@ -3,53 +3,88 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
-use App\Support\JwstHelper;
-use App\Services\IssService;
-use App\Services\OsdrService;
-use App\Services\SpaceService;
 
 /**
- * DashboardController - рефакторен для использования Service Layer
- * Бизнес-логика переведена в IssService, OsdrService, SpaceService
+ * DashboardController - главный дашборд
  */
 class DashboardController extends Controller
 {
-    public function __construct(
-        private IssService $issService,
-        private OsdrService $osdrService,
-        private SpaceService $spaceService,
-    ) {}
-
     public function index()
     {
-        // Получаем данные через сервисы с кэшированием
-        $issLast = $this->issService->getLastIss();
-        $trend = $this->issService->getTrend();
-        $osdrList = $this->osdrService->getList(10);
+        // Получаем данные из Rust API
+        $base = env('RUST_ISS_BASE', 'http://rust_iss:3000');
         
-        // Преобразуем DTO в массив для обратной совместимости с Blade шаблонами
-        $iss = $issLast ? [
-            'payload' => [
-                'latitude' => $issLast->getLatitude(),
-                'longitude' => $issLast->getLongitude(),
-                'velocity' => $issLast->getVelocity(),
-                'altitude' => $issLast->payload['altitude'] ?? null,
-            ]
-        ] : [];
+        // ISS данные
+        try {
+            $ch = curl_init($base . '/last');
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 5,
+            ]);
+            $raw = curl_exec($ch);
+            $lastData = $raw ? json_decode($raw, true) : null;
+            curl_close($ch);
+
+            $iss = isset($lastData['data']) ? $lastData['data'] : [];
+        } catch (\Exception $e) {
+            $iss = [];
+        }
+
+        // OSDR данные
+        try {
+            $ch = curl_init($base . '/osdr/list?limit=5');
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 5,
+            ]);
+            $raw = curl_exec($ch);
+            $osdrData = $raw ? json_decode($raw, true) : null;
+            curl_close($ch);
+
+            $osdr = isset($osdrData['data']['items']) ? $osdrData['data']['items'] : [];
+        } catch (\Exception $e) {
+            $osdr = [];
+        }
+
+        // APOD данные
+        try {
+            $ch = curl_init($base . '/space/latest/apod');
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 5,
+            ]);
+            $raw = curl_exec($ch);
+            $apodData = $raw ? json_decode($raw, true) : null;
+            curl_close($ch);
+
+            $apod = isset($apodData['data']) ? $apodData['data'] : null;
+        } catch (\Exception $e) {
+            $apod = null;
+        }
+
+        // NEO данные
+        try {
+            $today = date('Y-m-d');
+            $ch = curl_init($base . '/space/latest/neo');
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 5,
+            ]);
+            $raw = curl_exec($ch);
+            $neoData = $raw ? json_decode($raw, true) : null;
+            curl_close($ch);
+
+            $neo = isset($neoData['data']['element_count']) ? $neoData['data']['element_count'] : 0;
+        } catch (\Exception $e) {
+            $neo = 0;
+        }
 
         return view('dashboard', [
             'iss' => $iss,
-            'trend' => $trend ? $trend->toArray() : [],
-            'jw_gallery' => [], // не нужно сервером
-            'jw_observation_raw' => [],
-            'jw_observation_summary' => [],
-            'jw_observation_images' => [],
-            'jw_observation_files' => [],
-            'metrics' => [
-                'iss_speed' => $issLast?->getVelocity(),
-                'iss_alt'   => $issLast?->payload['altitude'] ?? null,
-                'neo_total' => 0,
-            ],
+            'osdr' => $osdr,
+            'apod' => $apod,
+            'neo' => $neo,
+            'base' => $base,
         ]);
     }
 

@@ -8,6 +8,7 @@ mod repo;
 mod routes;
 mod services;
 mod validation;
+mod tests;
 
 use config::Config;
 use handlers::AppState;
@@ -28,10 +29,13 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env();
     info!("Config loaded");
 
-    // Инициализировать пул БД
+    // Инициализировать пул БД с оптимизированными параметрами
     let pool = PgPoolOptions::new()
-        .max_connections(10)
-        .acquire_timeout(Duration::from_secs(5))
+        .max_connections(config.db_pool_size.unwrap_or(20))
+        .min_connections(config.db_min_idle.unwrap_or(5))
+        .acquire_timeout(Duration::from_secs(30))
+        .idle_timeout(Duration::from_secs(600))
+        .max_lifetime(Duration::from_secs(1800))
         .connect(&config.database_url)
         .await?;
 
@@ -149,15 +153,59 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // JWST фоновое обновление
+    {
+        let state = state.clone();
+        let interval = config.jwst_every_seconds;
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = state.space_service.refresh_source("jwst").await {
+                    error!("JWST refresh error: {}", e);
+                }
+                tokio::time::sleep(Duration::from_secs(interval)).await;
+            }
+        });
+    }
+
     // ============ HTTP Server ============
 
-    let app = routes::create_router(state);
+    let app = routes::create_router(state, config.clone());
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3000)).await?;
     info!("🚀 Server listening on 0.0.0.0:3000");
 
-    axum::serve(listener, app.into_make_service()).await?;
+    // Graceful shutdown
+    let shutdown = async {
+        let ctrl_c = async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install Ctrl+C handler");
+        };
 
+        #[cfg(unix)]
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install signal handler")
+                .recv()
+                .await;
+        };
+
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = terminate => {},
+        }
+
+        info!("Shutdown signal received, starting graceful shutdown...");
+    };
+
+    axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(shutdown)
+        .await?;
+
+    info!("Server stopped gracefully");
     Ok(())
 }
 

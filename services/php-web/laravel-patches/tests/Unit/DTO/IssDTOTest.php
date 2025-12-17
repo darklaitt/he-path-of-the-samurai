@@ -43,6 +43,76 @@ class IssDTOTest extends TestCase
         $dto->id = 2;
     }
 
+    /**
+     * Test 1: IssDTO creation from array with all fields
+     */
+    public function testIssDTOFromArrayWithAllFields(): void
+    {
+        $data = [
+            'id' => 1,
+            'fetched_at' => '2025-12-15T20:00:00+00:00',
+            'source_url' => 'https://api.wheretheiss.at/v1/satellites/25544',
+            'payload' => [
+                'latitude' => 51.5074,
+                'longitude' => -0.1278,
+                'altitude' => 408.5,
+                'velocity' => 27600.0
+            ]
+        ];
+
+        $dto = IssDTO::fromArray($data);
+
+        $this->assertEquals(1, $dto->id);
+        $this->assertEquals('https://api.wheretheiss.at/v1/satellites/25544', $dto->source_url);
+        $this->assertIsArray($dto->payload);
+        $this->assertInstanceOf(\DateTimeImmutable::class, $dto->fetched_at);
+    }
+
+    /**
+     * Test 2: IssDTO getter methods return correct values
+     */
+    public function testIssDTOGettersReturnCorrectValues(): void
+    {
+        $dto = new IssDTO(
+            id: 42,
+            fetched_at: new \DateTimeImmutable('2025-12-15T20:00:00+00:00'),
+            source_url: 'https://api.wheretheiss.at/v1/satellites/25544',
+            payload: [
+                'latitude' => 51.5074,
+                'longitude' => -0.1278,
+                'altitude' => 408.5,
+                'velocity' => 27600.0
+            ]
+        );
+
+        $this->assertEquals(51.5074, $dto->getLatitude());
+        $this->assertEquals(-0.1278, $dto->getLongitude());
+        $this->assertEquals(27600.0, $dto->getVelocity());
+        $this->assertEquals(408.5, $dto->getAltitude());
+    }
+
+    /**
+     * Test 3: IssDTO toArray conversion preserves all data
+     */
+    public function testIssDTOToArrayConversion(): void
+    {
+        $dto = new IssDTO(
+            id: 1,
+            fetched_at: new \DateTimeImmutable('2025-12-15T20:00:00+00:00'),
+            source_url: 'https://api.wheretheiss.at/v1/satellites/25544',
+            payload: ['latitude' => 51.5074, 'longitude' => -0.1278]
+        );
+
+        $array = $dto->toArray();
+
+        $this->assertIsArray($array);
+        $this->assertArrayHasKey('id', $array);
+        $this->assertArrayHasKey('fetched_at', $array);
+        $this->assertArrayHasKey('source_url', $array);
+        $this->assertArrayHasKey('payload', $array);
+        $this->assertEquals(1, $array['id']);
+    }
+
     public function testIssDTOContainsValidPayload(): void
     {
         // Arrange

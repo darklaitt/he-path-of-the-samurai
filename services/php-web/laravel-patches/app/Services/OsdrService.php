@@ -39,11 +39,11 @@ class OsdrService
      */
     public function search(string $query): Collection
     {
-        $items = $this->getList(100); // Берём больше на случай фильтрации
+        $items = $this->getList(100);
 
         return $items->filter(function (OsdrItemDTO $item) use ($query) {
             $query = strtolower($query);
-            return strpos(strtolower($item->dataset_title), $query) !== false
+            return strpos(strtolower($item->title), $query) !== false
                 || strpos(strtolower($item->dataset_id), $query) !== false;
         });
     }

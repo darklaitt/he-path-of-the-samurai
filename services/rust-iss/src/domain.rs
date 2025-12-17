@@ -56,7 +56,7 @@ impl SpaceCache {
 }
 
 /// ISS Trend - тренд движения МКС
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssTrend {
     pub movement: bool,
     pub delta_km: f64,

@@ -1,10 +1,12 @@
 use crate::domain::ApiResponse;
 use crate::error::ApiError;
 use crate::services::*;
-use axum::extract::{Path, State};
+use crate::validation::*;
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde_json::json;
 use sqlx::PgPool;
+use validator::Validate;
 
 /// App State - DI контейнер
 #[derive(Clone)]
@@ -18,9 +20,9 @@ pub struct AppState {
 
 impl AppState {
     pub async fn new(pool: PgPool, client: crate::clients::ApiClient, cache: crate::cache::CacheClient) -> Self {
-        let iss = IssService::new(pool.clone(), client.clone());
-        let osdr = OsdrService::new(pool.clone(), client.clone());
-        let space = SpaceService::new(pool.clone(), client);
+        let iss = IssService::new(pool.clone(), client.clone(), cache.clone());
+        let osdr = OsdrService::new(pool.clone(), client.clone(), cache.clone());
+        let space = SpaceService::new(pool.clone(), client, cache.clone());
 
         Self {
             pool,
@@ -32,7 +34,7 @@ impl AppState {
     }
 }
 
-// ============ Health Handler ============
+// ============ Root & Health Handlers ============
 
 #[derive(serde::Serialize)]
 pub struct HealthResponse {
@@ -45,6 +47,21 @@ pub async fn health_handler() -> Json<ApiResponse<HealthResponse>> {
         status: "ok".to_string(),
         now: chrono::Utc::now(),
     }))
+}
+
+/// Корневой handler, чтобы `/` не отдавал 404
+pub async fn root_handler() -> Json<ApiResponse<serde_json::Value>> {
+    Json(ApiResponse::success(json!({
+        "service": "rust_iss",
+        "status": "ok",
+        "endpoints": [
+            "/health",
+            "/last",
+            "/iss/trend",
+            "/osdr/list",
+            "/space/summary"
+        ]
+    })))
 }
 
 // ============ ISS Handlers ============
@@ -85,8 +102,24 @@ pub async fn osdr_sync_handler(
 
 pub async fn osdr_list_handler(
     State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let items = state.osdr_service.list(None).await?;
+    // Валидация параметров
+    let limit = params.get("limit")
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|&l| l > 0 && l <= 100);
+    
+    let osdr_params = OsdrQueryParams { 
+        limit, 
+        status: params.get("status").cloned(),
+        search: params.get("search").cloned(),
+        sort_by: params.get("sort_by").cloned(),
+        sort_order: params.get("sort_order").cloned(),
+    };
+    osdr_params.validate()
+        .map_err(|e| ApiError::bad_request("VALIDATION_ERROR", format!("Invalid parameters: {}", e)))?;
+    
+    let items = state.osdr_service.list(limit).await?;
     Ok(Json(ApiResponse::success(json!({"items": items}))))
 }
 
@@ -96,6 +129,10 @@ pub async fn space_latest_handler(
     Path(src): Path<String>,
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    // Валидация source ID
+    validate_source_id(&src)
+        .map_err(|e| ApiError::bad_request("INVALID_SOURCE", e))?;
+    
     let cache = state.space_service.get_latest(&src).await?;
 
     match cache {

@@ -36,6 +36,9 @@ class DashboardControllerTest extends FeatureTestCase
         $this->app->bind(IssService::class, fn() => $this->mockIssService);
     }
 
+    /**
+     * Test 9: Dashboard page loads and displays view
+     */
     public function testIndexPageLoads(): void
     {
         // Arrange
@@ -64,6 +67,9 @@ class DashboardControllerTest extends FeatureTestCase
         $response->assertViewIs('dashboard');
     }
 
+    /**
+     * Test 10: API endpoint /api/iss/last returns ISS data as JSON
+     */
     public function testGetLastIssApiEndpoint(): void
     {
         // Arrange
@@ -100,6 +106,9 @@ class DashboardControllerTest extends FeatureTestCase
         ]);
     }
 
+    /**
+     * Test 12: API trend endpoint returns movement data
+     */
     public function testGetTrendApiEndpoint(): void
     {
         // Arrange
@@ -136,6 +145,9 @@ class DashboardControllerTest extends FeatureTestCase
         ]);
     }
 
+    /**
+     * Test 13: API refresh endpoint triggers fresh data fetch
+     */
     public function testRefreshIssApiEndpoint(): void
     {
         // Arrange
@@ -215,6 +227,9 @@ class DashboardControllerTest extends FeatureTestCase
         $response2->assertStatus(200);
     }
 
+    /**
+     * Test 14: Dashboard handles null service responses gracefully
+     */
     public function testDashboardHandlesServiceFailure(): void
     {
         // Arrange
@@ -230,6 +245,9 @@ class DashboardControllerTest extends FeatureTestCase
         $response->assertStatus(200); // Page still loads
     }
 
+    /**
+     * Test 15: JSON responses have correct structure with ok flag
+     */
     public function testJsonResponseHasCorrectStructure(): void
     {
         // Arrange
